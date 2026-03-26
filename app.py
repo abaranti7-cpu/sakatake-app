@@ -6,7 +6,7 @@ import calendar
 from supabase import create_client, Client
 
 # ==========================================
-# 1. Supabaseの接続設定
+# 1. Supabaseの接続設定と初期化
 # ==========================================
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
@@ -14,7 +14,14 @@ supabase: Client = create_client(url, key)
 
 SCH_COLS = ["ID", "日付", "時間", "予定の内容", "顧客名", "担当者", "ステータス"]
 EXP_COLS = ["ID", "日付", "項目", "金額", "支払った人", "ステータス"]
-MSG_COLS = ["ID", "日時", "送信者", "宛先", "本文", "ステータス"]
+MSG_COLS = ["ID", "日時", "送信者", "宛先", "本文", "ステータス", "既読者"]
+MEM_COLS = ["ID", "名前"]
+
+# --- セッション状態（ログインユーザー）の初期化 ---
+if "current_user" not in st.session_state:
+    st.session_state["current_user"] = "阪口" # 初期値
+
+current_user = st.session_state["current_user"]
 
 # ==========================================
 # 2. データベース操作用の関数
@@ -31,6 +38,10 @@ def load_messages():
     response = supabase.table("messages").select("*").execute()
     return pd.DataFrame(response.data) if response.data else pd.DataFrame(columns=MSG_COLS)
 
+def load_members():
+    response = supabase.table("members").select("*").execute()
+    return pd.DataFrame(response.data) if response.data else pd.DataFrame(columns=MEM_COLS)
+
 def insert_schedule(data_dict):
     supabase.table("schedule").insert(data_dict).execute()
 
@@ -46,8 +57,17 @@ def delete_schedule(sch_id):
 def delete_expense(exp_id):
     supabase.table("expenses").update({"ステータス": "削除済み"}).eq("ID", exp_id).execute()
 
-def update_message_status(msg_id):
-    supabase.table("messages").update({"ステータス": "確認済み"}).eq("ID", msg_id).execute()
+# --- 新規追加：メンバー管理と個別既読の関数 ---
+def insert_member(name):
+    supabase.table("members").insert({"ID": str(uuid.uuid4()), "名前": name}).execute()
+
+def delete_member(member_id):
+    supabase.table("members").delete().eq("ID", member_id).execute()
+
+def mark_as_read(msg_id, current_read_by, user_name):
+    # 既存の既読者がいればカンマ区切りで追加、いなければそのまま追加
+    new_read_by = user_name if not current_read_by else f"{current_read_by},{user_name}"
+    supabase.table("messages").update({"既読者": new_read_by}).eq("ID", msg_id).execute()
 
 # --------------------------------------------------
 # ダイアログ（ポップアップ）の設定
@@ -82,11 +102,19 @@ def highlight_deleted(row):
 # ==========================================
 # UI・画面構成
 # ==========================================
-# 未確認メッセージの数を計算してメニューの表示を変える
 df_msg = load_messages()
-unread_count = len(df_msg[df_msg["ステータス"] == "未確認"]) if not df_msg.empty else 0
+df_members = load_members()
+member_names = df_members["名前"].tolist() if not df_members.empty else ["阪口", "竹之内"]
 
-# 未読がある場合は赤文字の通知アイコンを追加
+# 未確認メッセージの数を「自分宛て かつ 未読」で計算
+unread_count = 0
+if not df_msg.empty:
+    for _, row in df_msg.iterrows():
+        is_for_me = (row["宛先"] == "全員" or row["宛先"] == current_user)
+        read_by = str(row.get("既読者", ""))
+        if is_for_me and current_user not in read_by:
+            unread_count += 1
+
 if unread_count > 0:
     msg_menu_label = f"💬 メッセージ 🔴未読{unread_count}件"
 else:
@@ -103,35 +131,40 @@ menu = st.sidebar.radio(
         "📝 スケジュール登録", 
         "📊 月別経費", 
         "🧾 経費一覧", 
-        "💰 経費登録"
+        "💰 経費登録",
+        "⚙️ 管理・ログイン" # 追加
     ]
 )
 
-st.title("阪竹行政書士事務所 共有アプリ")
+st.sidebar.markdown("---")
+st.sidebar.write(f"👤 **ログイン中: {current_user}**")
+
+st.title(f"阪竹行政書士事務所 共有アプリ")
 today = datetime.date.today()
 
 # ==========================================
 # 💬 メッセージ
 # ==========================================
-# メニュー名が動的に変わるため、.startswith() で判定します
 if menu.startswith("💬 メッセージ"):
     st.header("💬 メッセージ")
     
     if df_msg.empty:
         st.info("現在、メッセージはありません。")
     else:
-        # 日時が新しい順に並び替え
         df_msg_sorted = df_msg.sort_values(by="日時", ascending=False)
         
         for _, row in df_msg_sorted.iterrows():
-            # 1件ずつカード（枠）で囲んで表示
+            # 自分が宛先に含まれているか、自分が読んだか判定
+            is_for_me = (row["宛先"] == "全員" or row["宛先"] == current_user)
+            read_by = str(row.get("既読者", ""))
+            is_unread = is_for_me and (current_user not in read_by)
+
             with st.container(border=True):
-                if row["ステータス"] == "未確認":
+                if is_unread:
                     st.markdown(f"**🔴 宛先: {row['宛先']}** （送信者: {row['送信者']} / {row['日時']}）")
                     st.write(row["本文"])
-                    # 確認済みボタン
                     if st.button("確認済みにする", key=f"btn_{row['ID']}"):
-                        update_message_status(row["ID"])
+                        mark_as_read(row["ID"], read_by, current_user)
                         st.rerun()
                 else:
                     st.markdown(f"<span style='color: gray;'>✅ 宛先: {row['宛先']} （送信者: {row['送信者']} / {row['日時']}）</span>", unsafe_allow_html=True)
@@ -144,33 +177,78 @@ elif menu == "✏️ メッセージの入力":
     st.header("✏️ メッセージの入力")
     
     with st.form("message_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            sender = st.selectbox("投稿者", ["阪口", "竹之内"])
-        with col2:
-            receiver = st.selectbox("宛先", ["全員", "阪口", "竹之内"])
+        st.write(f"**投稿者:** {current_user}")
+        
+        receiver_options = ["全員"] + member_names
+        receiver = st.selectbox("宛先", receiver_options)
             
         content = st.text_area("メッセージ本文")
         submit_msg = st.form_submit_button("送信")
         
     if submit_msg:
-        # 投稿した瞬間の日本時間（JST）を自動取得
         jst = datetime.timezone(datetime.timedelta(hours=9))
         now_str = datetime.datetime.now(jst).strftime("%Y-%m-%d %H:%M")
         
         new_row = {
             "ID": str(uuid.uuid4()), 
             "日時": now_str, 
-            "送信者": sender, 
+            "送信者": current_user, 
             "宛先": receiver, 
             "本文": content, 
-            "ステータス": "未確認" # 初期状態は未確認
+            "ステータス": "未確認",
+            "既読者": "" # 最初は誰も読んでいない状態
         }
         insert_message(new_row)
         st.success("✅ メッセージを送信しました！")
 
 # ==========================================
-# 🗓️ 月間カレンダー
+# ⚙️ 管理・ログイン（新規追加）
+# ==========================================
+elif menu == "⚙️ 管理・ログイン":
+    st.header("⚙️ 管理・ログイン")
+
+    st.subheader("👤 ログインユーザー切り替え")
+    current_index = member_names.index(current_user) if current_user in member_names else 0
+    selected_user = st.selectbox("ユーザーを選択", member_names, index=current_index)
+    
+    if st.button("切り替える"):
+        st.session_state["current_user"] = selected_user
+        st.success(f"{selected_user} さんとしてログインしました！")
+        st.rerun()
+
+    st.markdown("---")
+
+    # 阪口さんのみメンバー管理可能
+    if current_user == "阪口":
+        st.subheader("👥 メンバー管理 (管理者権限)")
+        
+        with st.form("add_member_form", clear_on_submit=True):
+            new_name = st.text_input("新規メンバー名")
+            if st.form_submit_button("追加"):
+                if new_name:
+                    insert_member(new_name)
+                    st.success(f"「{new_name}」さんを追加しました！")
+                    st.rerun()
+                else:
+                    st.error("名前を入力してください")
+
+        st.write("**登録済みメンバー**")
+        for _, row in df_members.iterrows():
+            col1, col2 = st.columns([3, 1])
+            col1.write(f"・ {row['名前']}")
+            
+            if row['名前'] in ["阪口", "竹之内"]:
+                col2.markdown("<span style='color:gray'>削除不可</span>", unsafe_allow_html=True)
+            else:
+                if col2.button("削除", key=f"del_mem_{row['ID']}"):
+                    delete_member(row['ID'])
+                    st.success("削除しました！")
+                    st.rerun()
+    else:
+        st.info("※ メンバーの追加・削除は、管理者（阪口）でのログイン時のみ可能です。")
+
+# ==========================================
+# 🗓️ 月間カレンダー (変更なし)
 # ==========================================
 elif menu == "🗓️ 月間カレンダー":
     st.header("🗓️ 月間カレンダー")
@@ -202,7 +280,7 @@ elif menu == "🗓️ 月間カレンダー":
     st.markdown(md_cal, unsafe_allow_html=True)
 
 # ==========================================
-# 📋 日別カレンダー
+# 📋 日別カレンダー (変更なし)
 # ==========================================
 elif menu == "📋 日別カレンダー":
     st.header("📋 日別カレンダー")
@@ -228,7 +306,7 @@ elif menu == "📋 日別カレンダー":
                     st.write(f"⏰ {event['時間']} | {event['予定の内容']} ({event['顧客名']}) - 担当:{event['担当者']}")
 
 # ==========================================
-# 📜 スケジュール一覧
+# 📜 スケジュール一覧 (変更なし)
 # ==========================================
 elif menu == "📜 スケジュール一覧":
     st.header("📜 スケジュール一覧")
@@ -252,7 +330,7 @@ elif menu == "📜 スケジュール一覧":
                 confirm_delete_schedule(selected_sch_id)
 
 # ==========================================
-# 📝 スケジュール登録
+# 📝 スケジュール登録 (担当者リストを連動)
 # ==========================================
 elif menu == "📝 スケジュール登録":
     st.header("📝 スケジュール登録")
@@ -265,7 +343,7 @@ elif menu == "📝 スケジュール登録":
             
         task = st.text_input("予定の内容 (例: 相続の初回面談など)")
         customer = st.text_input("お客様 / 顧客名 (例: 〇〇様、〇〇株式会社など)")
-        assignee = st.selectbox("担当者", ["全員", "阪口", "竹之内"])
+        assignee = st.selectbox("担当者", ["全員"] + member_names)
         submit = st.form_submit_button("予定を追加")
         
     if submit:
@@ -282,7 +360,7 @@ elif menu == "📝 スケジュール登録":
         st.success("✅ 予定を保存しました！")
 
 # ==========================================
-# 📊 月別経費
+# 📊 月別経費 (変更なし)
 # ==========================================
 elif menu == "📊 月別経費":
     st.header("📊 月別経費")
@@ -312,7 +390,7 @@ elif menu == "📊 月別経費":
             st.dataframe(display_monthly, hide_index=True, use_container_width=True)
 
 # ==========================================
-# 🧾 経費一覧
+# 🧾 経費一覧 (変更なし)
 # ==========================================
 elif menu == "🧾 経費一覧":
     st.header("🧾 経費一覧")
@@ -336,7 +414,7 @@ elif menu == "🧾 経費一覧":
                 confirm_delete_expense(selected_exp_id)
 
 # ==========================================
-# 💰 経費登録
+# 💰 経費登録 (支払った人を連動)
 # ==========================================
 elif menu == "💰 経費登録":
     st.header("💰 経費登録")
@@ -344,7 +422,7 @@ elif menu == "💰 経費登録":
         e_date = st.date_input("支払日")
         item = st.text_input("項目 (例: コピー用紙など)")
         amount = st.number_input("金額 (円)", min_value=0, step=100)
-        payer = st.selectbox("支払った人", ["阪口", "竹之内"])
+        payer = st.selectbox("支払った人", member_names)
         e_submit = st.form_submit_button("経費を登録")
         
     if e_submit:
