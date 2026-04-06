@@ -23,26 +23,59 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. Supabaseの接続設定と初期化
+# 2. Supabaseの接続設定
 # ==========================================
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(url, key)
 
-# --- セッション状態（ログインユーザー）の初期化 ---
+# ==========================================
+# 3. 🔐 ログイン（認証）管理システム
+# ==========================================
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
 if "current_user" not in st.session_state:
-    st.session_state["current_user"] = "阪口"
+    st.session_state["current_user"] = "阪口" # 初期表示名
+if "last_login" not in st.session_state:
+    st.session_state["last_login"] = None
+
+# 7日間の経過チェック
+if st.session_state["logged_in"] and st.session_state["last_login"]:
+    days_since_login = (datetime.datetime.now() - st.session_state["last_login"]).days
+    if days_since_login >= 7:
+        st.session_state["logged_in"] = False
+        st.warning("セッションの有効期限（7日間）が切れました。再度ログインしてください。")
+
+# ログイン画面の表示（未ログイン時）
+if not st.session_state["logged_in"]:
+    st.title("🔐 阪竹事務所 システムログイン")
+    st.write("Supabaseで登録したメールアドレスとパスワードを入力してください。")
+    with st.form("login_form"):
+        email = st.text_input("メールアドレス")
+        password = st.text_input("パスワード", type="password")
+        if st.form_submit_button("ログイン", type="primary"):
+            try:
+                # Supabaseで認証チェック
+                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                if res.user:
+                    st.session_state["logged_in"] = True
+                    st.session_state["last_login"] = datetime.datetime.now()
+                    st.rerun()
+            except Exception:
+                st.error("ログインに失敗しました。メールアドレスとパスワードを確認してください。")
+    st.stop() # ログインが完了するまで、この下にあるメイン画面のコードは実行しない
+
 current_user = st.session_state["current_user"]
 
 # ==========================================
-# 3. データベース取得関数
+# 4. データベース取得関数
 # ==========================================
 def fetch_table(table_name, order_col="ID", ascending=False):
     response = supabase.table(table_name).select("*").order(order_col, desc=not ascending).execute()
     return pd.DataFrame(response.data) if response.data else pd.DataFrame()
 
 # ==========================================
-# 4. ポップアップ（ダイアログ）設定
+# 5. ポップアップ（ダイアログ）設定
 # ==========================================
 @st.dialog("⚠️ 削除の確認")
 def confirm_delete(table_name, target_id):
@@ -116,7 +149,7 @@ def edit_case_record(row):
             st.rerun()
 
 # ==========================================
-# 共通変数の準備
+# 6. メニューとサイドバー（ログイン後）
 # ==========================================
 today = datetime.date.today()
 df_members = fetch_table("members", "名前", True)
@@ -130,22 +163,31 @@ if not df_msg.empty:
             unread_count += 1
 msg_label = f"💬 メッセージ 🔴{unread_count}" if unread_count > 0 else "💬 メッセージ"
 
-# --- サイドバー・メニュー ---
 menu = st.sidebar.radio("📂 メニュー", [
     msg_label, '✏️ メッセージ入力', '🗓️ 月間カレンダー', '📋 日別一覧', '📜 スケジュール一覧', '📝 スケジュール登録', 
-    '📊 月別経費', '🧾 経費一覧', '💰 経費登録', '🚗 移動記録入力', '🚗 移動記録一覧', '📁 事件簿入力', '📁 事件簿一覧', '⚙️ 管理・ログイン'
+    '📊 月別経費', '🧾 経費一覧', '💰 経費登録', '🚗 移動記録入力', '🚗 移動記録一覧', '📁 事件簿入力', '📁 事件簿一覧', '⚙️ 管理・設定'
 ])
 st.sidebar.markdown("---")
-st.sidebar.write(f"👤 **ログイン中: {current_user}**")
+st.sidebar.write(f"👤 **表示名: {current_user}**")
 st.title("阪竹事務所 Webシステム")
 # ==========================================
-# 管理・ログイン・メッセージ機能
+# 管理・設定・メッセージ機能
 # ==========================================
-if menu == "⚙️ 管理・ログイン":
-    st.header("⚙️ 管理・ログイン")
-    st.subheader("👤 ユーザー切り替え")
-    selected_user = st.selectbox("ログインするユーザーを選択", member_names, index=member_names.index(current_user) if current_user in member_names else 0)
-    if st.button("切り替える"):
+if menu == "⚙️ 管理・設定":
+    st.header("⚙️ 管理・設定")
+    
+    st.subheader("🚪 システムからログアウト")
+    st.write("この端末から完全にログアウトし、次回アクセス時にパスワードを要求するようにします。")
+    if st.button("ログアウトする", type="primary"):
+        supabase.auth.sign_out()
+        st.session_state["logged_in"] = False
+        st.session_state["last_login"] = None
+        st.rerun()
+        
+    st.markdown("---")
+    st.subheader("👤 表示名切り替え (メッセージ等用)")
+    selected_user = st.selectbox("自分の表示名を選択", member_names, index=member_names.index(current_user) if current_user in member_names else 0)
+    if st.button("表示名を切り替える"):
         st.session_state["current_user"] = selected_user
         st.rerun()
         
@@ -167,7 +209,7 @@ if menu == "⚙️ 管理・ログイン":
                     supabase.table("members").delete().eq("ID", row['ID']).execute()
                     st.rerun()
     else:
-        st.info("※メンバー管理は阪口ログイン時のみ可能です。")
+        st.info("※メンバー管理は表示名「阪口」での利用時のみ可能です。")
 
 elif menu.startswith("💬 メッセージ"):
     st.header("💬 メッセージ一覧")
@@ -325,7 +367,7 @@ elif menu == '🚗 移動記録入力':
         arr = st.text_input("到着地 (例: 東区役所)")
         note = st.text_input("備考")
         
-        if st.form_submit_button("記録を追加"):
+        if st.form_submit_button("記録を追加", type="primary"):
             if dep and arr:
                 date_str = str(date)
                 # その日の有効な記録を取得して連番を計算
