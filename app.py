@@ -27,7 +27,10 @@ st.markdown("""
 # ==========================================
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(url, key)
+# セッション内でクライアントを使い回すことで、ログイン状態を安定させます
+if "supabase_client" not in st.session_state:
+    st.session_state["supabase_client"] = create_client(url, key)
+supabase = st.session_state["supabase_client"]
 
 # ==========================================
 # 3. 🔐 ログイン（認証）管理システム
